@@ -61,21 +61,31 @@ func (s *Server) Run(ctx context.Context) error {
 		s.options.DHCPProxyIfaceOrIP = s.options.APIAdvertiseAddress
 	}
 
-	configServerEnabled := s.options.Omni.APIEndpoint != ""
+	configServerEnabled := s.options.Omni.Enabled()
 
 	s.logger.Info(
 		"starting server",
 		zap.Any("options", s.options),
 	)
 
-	var configHandler http.Handler
+	var (
+		configHandler      http.Handler
+		imageFactoryClient imageFactoryClient
+	)
 
 	if configServerEnabled {
+		omniClient, omniErr := omni.NewClient(s.options.Omni)
+		if omniErr != nil {
+			return fmt.Errorf("failed to create Omni API client: %w", omniErr)
+		}
+
+		defer omniClient.Close() //nolint:errcheck
+
 		var machineConfig []byte
 
 		var omniConnOpts omni.ConnectionOptions
 
-		if omniConnOpts, err = omni.GetConnectionOptions(ctx, s.options.Omni.APIEndpoint, s.options.Omni.APIInsecureSkipTLSVerify, s.logger); err != nil {
+		if omniConnOpts, err = omni.GetConnectionOptions(ctx, omniClient.Omni().State(), s.logger); err != nil {
 			return fmt.Errorf("failed to get Omni connection options: %w", err)
 		}
 
@@ -84,20 +94,24 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 
 		configHandler = config.NewHandler(machineConfig, s.logger.Named("config_handler"))
-	}
 
-	imageFactoryClient, err := imagefactory.NewClient(s.options.ImageFactoryBaseURL, s.options.ImageFactoryPXEBaseURL,
-		s.options.SecureBootEnabled, s.logger.Named("image_factory_client"))
-	if err != nil {
-		return fmt.Errorf("failed to create image factory client: %w", err)
+		s.logger.Info("boot assets will be resolved through Omni, using the image factory Omni is configured with")
+
+		imageFactoryClient = imagefactory.NewOmniClient(omniClient, s.options.SecureBootEnabled, s.logger.Named("image_factory_client"))
+	} else {
+		if imageFactoryClient, err = imagefactory.NewClient(s.options.ImageFactoryBaseURL, s.options.ImageFactoryPXEBaseURL,
+			s.options.SecureBootEnabled, s.logger.Named("image_factory_client")); err != nil {
+			return fmt.Errorf("failed to create image factory client: %w", err)
+		}
 	}
 
 	if s.options.TalosVersion == "" {
-		if s.options.TalosVersion, err = imageFactoryClient.GetLatestStableVersion(ctx); err != nil {
-			return fmt.Errorf("failed to get the latest stable Talos version from the image factory: %w", err)
+		if s.options.TalosVersion, err = imageFactoryClient.DefaultTalosVersion(ctx); err != nil {
+			return fmt.Errorf("failed to get the default Talos version: %w", err)
 		}
 
-		s.logger.Info("Talos version is not explicitly defined, the latest stable Talos version from the image factory will be used",
+		s.logger.Info("Talos version is not explicitly defined, the default Talos version will be used "+
+			"(the default of Omni if connected to Omni, otherwise the latest stable version of the image factory)",
 			zap.String("version", s.options.TalosVersion))
 	}
 
@@ -130,6 +144,12 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	return s.runComponents(ctx, components)
+}
+
+// imageFactoryClient resolves the iPXE URLs of the boot assets and the default Talos version.
+type imageFactoryClient interface {
+	ipxe.ImageFactoryClient
+	DefaultTalosVersion(ctx context.Context) (string, error)
 }
 
 type component struct {

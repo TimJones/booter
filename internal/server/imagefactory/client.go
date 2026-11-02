@@ -6,16 +6,15 @@ package imagefactory
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"time"
 
 	"github.com/blang/semver/v4"
 	"github.com/siderolabs/image-factory/pkg/client"
-	"github.com/siderolabs/image-factory/pkg/schematic"
 	"go.uber.org/zap"
 )
 
-// Client is an image factory client.
+// Client is an image factory client which talks to an unauthenticated image factory directly.
 type Client struct {
 	factoryClient     *client.Client
 	logger            *zap.Logger
@@ -38,23 +37,41 @@ func NewClient(baseURL, pxeBaseURL string, secureBootEnabled bool, logger *zap.L
 	}, nil
 }
 
-// EnsureSchematic ensures a schematic exists on the image factory and returns its ID.
-func (c *Client) EnsureSchematic(ctx context.Context, extensions, extraKernelArgs []string) (string, error) {
-	logger := c.logger.With(zap.Strings("extensions", extensions), zap.Strings("extra_kernel_args", extraKernelArgs))
+// IPXEURL ensures the schematic of the request exists on the image factory, unless the request names an existing one,
+// and returns the iPXE URL of its boot assets.
+func (c *Client) IPXEURL(ctx context.Context, request IPXERequest) (string, error) {
+	if err := request.validate(); err != nil {
+		return "", err
+	}
+
+	schematicID := request.SchematicID
+
+	if schematicID == "" {
+		var err error
+
+		if schematicID, err = c.ensureSchematic(ctx, request); err != nil {
+			return "", err
+		}
+	}
+
+	ipxeURL := fmt.Sprintf("%s/pxe/%s/%s/metal-%s", c.pxeBaseURL, schematicID, request.TalosVersion, request.Arch)
+
+	if c.secureBootEnabled {
+		ipxeURL += "-secureboot"
+	}
+
+	return ipxeURL, nil
+}
+
+func (c *Client) ensureSchematic(ctx context.Context, request IPXERequest) (string, error) {
+	logger := c.logger.With(zap.Strings("extensions", request.Extensions), zap.Strings("extra_kernel_args", request.ExtraKernelArgs))
 
 	logger.Debug("ensure schematic")
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
-	sch := schematic.Schematic{
-		Customization: schematic.Customization{
-			ExtraKernelArgs: extraKernelArgs,
-			SystemExtensions: schematic.SystemExtensions{
-				OfficialExtensions: extensions,
-			},
-		},
-	}
+	sch := request.schematic()
 
 	marshaled, err := sch.Marshal()
 	if err != nil {
@@ -71,31 +88,8 @@ func (c *Client) EnsureSchematic(ctx context.Context, extensions, extraKernelArg
 	return schematicID, nil
 }
 
-// GetIPXEURL returns the iPXE URL for the given schematic ID, Talos version, and architecture.
-func (c *Client) GetIPXEURL(schematicID, talosVersion, arch string) (string, error) {
-	if schematicID == "" {
-		return "", fmt.Errorf("schematic ID is required")
-	}
-
-	if talosVersion == "" {
-		return "", fmt.Errorf("talos version is required")
-	}
-
-	if arch == "" {
-		return "", fmt.Errorf("arch is required")
-	}
-
-	ipxeURL := fmt.Sprintf("%s/pxe/%s/%s/metal-%s", c.pxeBaseURL, schematicID, talosVersion, arch)
-
-	if c.secureBootEnabled {
-		ipxeURL += "-secureboot"
-	}
-
-	return ipxeURL, nil
-}
-
-// GetLatestStableVersion returns the latest stable Talos version from the image factory.
-func (c *Client) GetLatestStableVersion(ctx context.Context) (string, error) {
+// DefaultTalosVersion returns the latest stable Talos version from the image factory.
+func (c *Client) DefaultTalosVersion(ctx context.Context) (string, error) {
 	versions, err := c.factoryClient.Versions(ctx)
 	if err != nil {
 		return "", err
@@ -122,7 +116,7 @@ func (c *Client) GetLatestStableVersion(ctx context.Context) (string, error) {
 	}
 
 	if latestStable == nil {
-		return "", fmt.Errorf("no stable versions found")
+		return "", errors.New("no stable versions found")
 	}
 
 	return latestStable.String(), nil

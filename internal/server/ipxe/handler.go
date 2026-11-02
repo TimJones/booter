@@ -14,6 +14,8 @@ import (
 	"github.com/siderolabs/omni-infra-provider-bare-metal/pkg/config"
 	pkgipxe "github.com/siderolabs/omni-infra-provider-bare-metal/pkg/ipxe"
 	"go.uber.org/zap"
+
+	"github.com/siderolabs/booter/internal/server/imagefactory"
 )
 
 const (
@@ -24,10 +26,9 @@ chain --replace %s
 	archAmd64 = "amd64"
 )
 
-// ImageFactoryClient represents an image factory client which ensures a schematic exists on image factory, and returns the PXE URL to it.
+// ImageFactoryClient resolves the iPXE URL of the Talos boot assets, either from the image factory directly or through Omni.
 type ImageFactoryClient interface {
-	EnsureSchematic(ctx context.Context, extensions, extraKernelArgs []string) (string, error)
-	GetIPXEURL(schematicID, talosVersion, arch string) (string, error)
+	IPXEURL(ctx context.Context, request imagefactory.IPXERequest) (string, error)
 }
 
 // HandlerOptions represents the options for the iPXE handler.
@@ -97,18 +98,20 @@ func (handler *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (handler *Handler) bootViaFactoryIPXEScript(ctx context.Context, arch string, kernelArgs []string) (body string, statusCode int, err error) {
-	schematicID := handler.options.SchematicID
-
-	if schematicID == "" {
-		if schematicID, err = handler.imageFactoryClient.EnsureSchematic(ctx, handler.options.Extensions, kernelArgs); err != nil {
-			return "", http.StatusInternalServerError, fmt.Errorf("failed to get schematic IPXE URL: %w", err)
-		}
+	request := imagefactory.IPXERequest{
+		SchematicID:  handler.options.SchematicID,
+		TalosVersion: handler.options.TalosVersion,
+		Arch:         arch,
 	}
 
-	var ipxeURL string
+	if request.SchematicID == "" {
+		request.Extensions = handler.options.Extensions
+		request.ExtraKernelArgs = kernelArgs
+	}
 
-	if ipxeURL, err = handler.imageFactoryClient.GetIPXEURL(schematicID, handler.options.TalosVersion, arch); err != nil {
-		return "", http.StatusInternalServerError, fmt.Errorf("failed to get schematic IPXE URL: %w", err)
+	ipxeURL, err := handler.imageFactoryClient.IPXEURL(ctx, request)
+	if err != nil {
+		return "", http.StatusInternalServerError, fmt.Errorf("failed to get schematic iPXE URL: %w", err)
 	}
 
 	ipxeScript := fmt.Sprintf(ipxeScriptTemplateFormat, ipxeURL)

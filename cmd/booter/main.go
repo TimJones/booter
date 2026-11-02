@@ -19,12 +19,17 @@ import (
 	"go.uber.org/zap/zapcore"
 
 	"github.com/siderolabs/booter/internal/server"
+	"github.com/siderolabs/booter/internal/server/omni"
 	"github.com/siderolabs/booter/internal/version"
 )
 
 const (
 	extraKernelArgsEnvVar = "EXTRA_KERNEL_ARGS"
 	extraKernelArgsFlag   = "extra-kernel-args"
+
+	omniAPIEndpointFlag        = "omni-api-endpoint"
+	imageFactoryBaseURLFlag    = "image-factory-base-url"
+	imageFactoryPXEBaseURLFlag = "image-factory-pxe-base-url"
 )
 
 var (
@@ -131,10 +136,10 @@ func init() {
 		"The interface name or the IP address on the interface to run the DHCP proxy server on. "+
 			"If it is an IP address, the DHCP proxy server will run on the interface that has the IP address. "+
 			"If not specified, defaults to the API advertise address.")
-	rootCmd.Flags().StringVar(&serverOptions.ImageFactoryBaseURL, "image-factory-base-url", serverOptions.ImageFactoryBaseURL,
-		"The base URL of the image factory.")
-	rootCmd.Flags().StringVar(&serverOptions.ImageFactoryPXEBaseURL, "image-factory-pxe-base-url", serverOptions.ImageFactoryPXEBaseURL,
-		"The base URL of the image factory PXE server.")
+	rootCmd.Flags().StringVar(&serverOptions.ImageFactoryBaseURL, imageFactoryBaseURLFlag, serverOptions.ImageFactoryBaseURL,
+		fmt.Sprintf("The base URL of the image factory. Cannot be used with --%s, the image factory Omni is configured with is used instead.", omniAPIEndpointFlag))
+	rootCmd.Flags().StringVar(&serverOptions.ImageFactoryPXEBaseURL, imageFactoryPXEBaseURLFlag, serverOptions.ImageFactoryPXEBaseURL,
+		fmt.Sprintf("The base URL of the image factory PXE server. Cannot be used with --%s, the image factory Omni is configured with is used instead.", omniAPIEndpointFlag))
 	rootCmd.Flags().BoolVar(
 		&serverOptions.SecureBootEnabled, "secure-boot-enabled", serverOptions.SecureBootEnabled,
 		"Serve secure boot UKI from the iPXE endpoint. The UKI can be used to boot a machine without secure boot, but it is required to boot a machine with secure boot.",
@@ -157,12 +162,17 @@ func init() {
 			"These extra args can also be set via the %q environment variable or via command line arguments.", extraKernelArgsEnvVar))
 
 	rootCmd.Flags().StringVar(&serverOptions.TalosVersion, "talos-version", serverOptions.TalosVersion, "The Talos version to use. If it is not specified, "+
-		"the latest stable Talos version from the image factory will be detected and used.")
+		fmt.Sprintf("the default Talos version of Omni is used when --%s is set, otherwise the latest stable Talos version from the image factory.", omniAPIEndpointFlag))
 
 	// Omni options
-	// todo: disabled for now, we can re-enable it after https://github.com/siderolabs/omni/issues/1375 for better UX
-	// rootCmd.Flags().StringVar(&serverOptions.Omni.APIEndpoint, "omni-api-endpoint", serverOptions.Omni.APIEndpoint,
-	//	"The endpoint of the Omni API. If specified, Talos machines will be connected to Omni.")
-	// rootCmd.Flags().BoolVar(&serverOptions.Omni.APIInsecureSkipTLSVerify, "omni-api-insecure-skip-tls-verify", serverOptions.Omni.APIInsecureSkipTLSVerify,
-	//	"Skip TLS verification for the Omni API endpoint. This is useful for development purposes, but should not be used in production.")
+	rootCmd.Flags().StringVar(&serverOptions.Omni.APIEndpoint, omniAPIEndpointFlag, serverOptions.Omni.APIEndpoint,
+		fmt.Sprintf("The endpoint of the Omni API. If specified, Talos machines will be connected to Omni, and the boot assets will be resolved through Omni "+
+			"from the image factory Omni is configured with, authenticated as that factory requires (e.g., an Enterprise Image Factory). "+
+			"Requires the %q environment variable to be set to the key of an Omni service account with the Operator role.", omni.ServiceAccountKeyEnvVar))
+	rootCmd.Flags().BoolVar(&serverOptions.Omni.APIInsecureSkipTLSVerify, "omni-api-insecure-skip-tls-verify", serverOptions.Omni.APIInsecureSkipTLSVerify,
+		"Skip TLS verification for the Omni API endpoint. This is useful for development purposes, but should not be used in production.")
+
+	// when connected to Omni, the image factory is the one Omni is configured with
+	rootCmd.MarkFlagsMutuallyExclusive(omniAPIEndpointFlag, imageFactoryBaseURLFlag)
+	rootCmd.MarkFlagsMutuallyExclusive(omniAPIEndpointFlag, imageFactoryPXEBaseURLFlag)
 }

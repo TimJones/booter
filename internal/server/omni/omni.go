@@ -2,6 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+// Package omni provides the Omni API integration of the server.
 package omni
 
 import (
@@ -10,18 +11,31 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/cosi-project/runtime/pkg/resource"
 	"github.com/cosi-project/runtime/pkg/safe"
+	"github.com/cosi-project/runtime/pkg/state"
 	"github.com/siderolabs/omni/client/pkg/client"
+	omniconstants "github.com/siderolabs/omni/client/pkg/constants"
+	"github.com/siderolabs/omni/client/pkg/omni/resources/omni"
 	"github.com/siderolabs/omni/client/pkg/omni/resources/siderolink"
 	"go.uber.org/zap"
 )
 
-// Options defines the options for building the machine configuration.
+// ServiceAccountKeyEnvVar is the environment variable that contains the Omni service account key.
+const ServiceAccountKeyEnvVar = "OMNI_SERVICE_ACCOUNT_KEY"
+
+// Options defines the options for connecting to Omni.
 type Options struct {
 	APIEndpoint              string
 	APIInsecureSkipTLSVerify bool
 }
 
+// Enabled returns whether an Omni connection is requested.
+func (o Options) Enabled() bool {
+	return o.APIEndpoint != ""
+}
+
+// ConnectionOptions contains the parameters machines need to connect to Omni over SideroLink.
 type ConnectionOptions struct {
 	SiderolinkAPIURL string
 	JoinToken        string
@@ -30,16 +44,27 @@ type ConnectionOptions struct {
 	KmsgLogPort int
 }
 
-func GetConnectionOptions(ctx context.Context, apiEndpoint string, insecureSkipTLSVerify bool, logger *zap.Logger) (ConnectionOptions, error) {
-	omniClient, err := buildAPIClient(apiEndpoint, insecureSkipTLSVerify)
-	if err != nil {
-		return ConnectionOptions{}, fmt.Errorf("failed to build Omni API client: %w", err)
+// NewClient creates a new Omni API client, authenticated with the service account key read from ServiceAccountKeyEnvVar.
+//
+// The caller is responsible for closing the client.
+func NewClient(options Options) (*client.Client, error) {
+	if options.APIEndpoint == "" {
+		return nil, errors.New("omni api endpoint is not set")
 	}
 
-	defer omniClient.Close() //nolint:errcheck
+	serviceAccountKey := os.Getenv(ServiceAccountKeyEnvVar)
+	if serviceAccountKey == "" {
+		return nil, fmt.Errorf("environment variable %q is not set", ServiceAccountKeyEnvVar)
+	}
 
-	st := omniClient.Omni().State()
+	return client.New(options.APIEndpoint,
+		client.WithServiceAccount(serviceAccountKey),
+		client.WithInsecureSkipTLSVerify(options.APIInsecureSkipTLSVerify),
+	)
+}
 
+// GetConnectionOptions reads the SideroLink connection parameters from Omni.
+func GetConnectionOptions(ctx context.Context, st state.State, logger *zap.Logger) (ConnectionOptions, error) {
 	//nolint:staticcheck
 	connectionParams, err := safe.StateGetByID[*siderolink.ConnectionParams](ctx, st, siderolink.ConfigID)
 	if err != nil {
@@ -61,19 +86,18 @@ func GetConnectionOptions(ctx context.Context, apiEndpoint string, insecureSkipT
 	}, nil
 }
 
-// buildOmniAPIClient creates a new Omni API client.
-func buildAPIClient(apiEndpoint string, insecureSkipTLSVerify bool) (*client.Client, error) {
-	if apiEndpoint == "" {
-		return nil, errors.New("omni api endpoint is not set")
+// DefaultTalosVersion returns the Talos version Omni uses as its default, which Omni marks with the omni.LabelDefaultVersion label.
+//
+// An Omni that labels no version falls back to the default of the Omni client library.
+func DefaultTalosVersion(ctx context.Context, st state.State) (string, error) {
+	versions, err := safe.StateListAll[*omni.TalosVersion](ctx, st, state.WithLabelQuery(resource.LabelExists(omni.LabelDefaultVersion)))
+	if err != nil {
+		return "", fmt.Errorf("failed to get the default Talos version from Omni: %w", err)
 	}
 
-	const omniServiceAccountKeyEnvVar = "OMNI_SERVICE_ACCOUNT_KEY"
-
-	serviceAccountKey := os.Getenv(omniServiceAccountKeyEnvVar)
-
-	if serviceAccountKey == "" {
-		return nil, fmt.Errorf("environment variable %q is not set", omniServiceAccountKeyEnvVar)
+	if versions.Len() > 0 {
+		return versions.Get(0).TypedSpec().Value.Version, nil
 	}
 
-	return client.New(apiEndpoint, client.WithServiceAccount(serviceAccountKey), client.WithInsecureSkipTLSVerify(insecureSkipTLSVerify))
+	return omniconstants.DefaultTalosVersion, nil
 }
